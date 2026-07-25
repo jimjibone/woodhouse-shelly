@@ -1,7 +1,7 @@
 package shelly_v1
 
 import (
-	"github.com/jimjibone/woodhouse-core/wh/v1"
+	"github.com/jimjibone/wh/v1/bridges"
 )
 
 type Device interface {
@@ -10,7 +10,7 @@ type Device interface {
 	SetNextIP(ip string)
 }
 
-type DeviceGenerator func(hostname, ip string, client *wh.Client) Device
+type DeviceGenerator func(hostname, ip string, client *bridges.Bridge) Device
 
 var registry = make(map[string]DeviceGenerator)
 
@@ -18,7 +18,7 @@ func registerDevice(deviceType string, generator DeviceGenerator) {
 	registry[deviceType] = generator
 }
 
-func Generate(deviceType, hostname, ip string, client *wh.Client) Device {
+func Generate(deviceType, hostname, ip string, client *bridges.Bridge) Device {
 	if gen, found := registry[deviceType]; found {
 		return gen(hostname, ip, client)
 	}

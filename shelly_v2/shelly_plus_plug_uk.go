@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jimjibone/wh/v1/bridges"
+	"github.com/jimjibone/wh/v1/bridges/services"
 	clientsapi "github.com/jimjibone/woodhouse-api/go/v1/clients"
-	"github.com/jimjibone/woodhouse-core/wh/v1"
-	"github.com/jimjibone/woodhouse-core/wh/v1/devices/services"
 )
 
 // ShellyPlusPlugUK - device type: PlusPlugUK
@@ -17,7 +17,7 @@ type ShellyPlusPlugUK struct {
 	relay0 *services.Relay
 }
 
-func NewShellyPlusPlugUK(hostname, ip string, client *wh.Client) *ShellyPlusPlugUK {
+func NewShellyPlusPlugUK(hostname, ip string, client *bridges.Bridge) *ShellyPlusPlugUK {
 	dev := &ShellyPlusPlugUK{
 		shelly: NewShellyComms(hostname, ip, clientsapi.Device_DEVICE, client),
 		info:   services.NewInfo(),

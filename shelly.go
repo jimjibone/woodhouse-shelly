@@ -8,12 +8,12 @@ import (
 
 	"github.com/grandcat/zeroconf"
 	"github.com/jimjibone/log"
-	"github.com/jimjibone/woodhouse-core/cmd/woodhouse-shelly/shelly_v1"
-	"github.com/jimjibone/woodhouse-core/cmd/woodhouse-shelly/shelly_v2"
-	"github.com/jimjibone/woodhouse-core/wh/v1"
+	"github.com/jimjibone/wh/v1/bridges"
+	"github.com/jimjibone/woodhouse-shelly/shelly_v1"
+	"github.com/jimjibone/woodhouse-shelly/shelly_v2"
 )
 
-func shellyStuff(wg *sync.WaitGroup, ctx context.Context, client *wh.Client) error {
+func shellyStuff(wg *sync.WaitGroup, ctx context.Context, client *bridges.Bridge) error {
 	defer wg.Done()
 
 	log.Infof("shelly started")
@@ -132,7 +132,7 @@ func shellyStuff(wg *sync.WaitGroup, ctx context.Context, client *wh.Client) err
 	}
 }
 
-func handleDiscovery(ip, hostname string, client *wh.Client) (deviceID string, device_v1 shelly_v1.Device, device_v2 shelly_v2.Device, retry bool) {
+func handleDiscovery(ip, hostname string, client *bridges.Bridge) (deviceID string, device_v1 shelly_v1.Device, device_v2 shelly_v2.Device, retry bool) {
 	// Gen 1 Device API - https://shelly-api-docs.shelly.cloud/gen1
 	if strings.Contains(hostname, "shelly") {
 		rest := shelly_v1.NewRest(ip)

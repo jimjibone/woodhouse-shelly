@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jimjibone/wh/v1/bridges"
+	"github.com/jimjibone/wh/v1/bridges/services"
 	clientsapi "github.com/jimjibone/woodhouse-api/go/v1/clients"
-	"github.com/jimjibone/woodhouse-core/wh/v1"
-	"github.com/jimjibone/woodhouse-core/wh/v1/devices/services"
 )
 
 // ShellyPlus2PM - device type: Plus2PM
@@ -20,7 +20,7 @@ type ShellyPlus2PM struct {
 	relay1 *services.Relay
 }
 
-func NewShellyPlus2PM(hostname, ip string, client *wh.Client) *ShellyPlus2PM {
+func NewShellyPlus2PM(hostname, ip string, client *bridges.Bridge) *ShellyPlus2PM {
 	dev := &ShellyPlus2PM{
 		shelly: NewShellyComms(hostname, ip, clientsapi.Device_DEVICE, client),
 		info:   services.NewInfo(),

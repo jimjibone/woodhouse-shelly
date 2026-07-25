@@ -10,9 +10,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jimjibone/log"
+	"github.com/jimjibone/wh/v1/bridges"
 	clientsapi "github.com/jimjibone/woodhouse-api/go/v1/clients"
-	"github.com/jimjibone/woodhouse-core/wh/v1"
-	"github.com/jimjibone/woodhouse-core/wh/v1/devices"
 )
 
 const (
@@ -26,8 +25,8 @@ type ShellyComms struct {
 	close func()
 	wg    sync.WaitGroup
 
-	client *wh.Client
-	dev    *devices.Device
+	bridge *bridges.Bridge
+	dev    *bridges.Device
 	added  bool
 
 	ip     string
@@ -45,13 +44,13 @@ type ShellyComms struct {
 	onNotificationFrame func(NotificationFrame)
 }
 
-func NewShellyComms(hostname, ip string, typ clientsapi.Device_DeviceType, client *wh.Client) *ShellyComms {
+func NewShellyComms(hostname, ip string, typ clientsapi.Device_DeviceType, client *bridges.Bridge) *ShellyComms {
 	ctx, cancel := context.WithCancel(context.Background())
 	dev := &ShellyComms{
 		log:    log.NewContext(log.DefaultLogger, hostname, log.DebugLevel),
 		close:  cancel,
-		client: client,
-		dev:    devices.NewDevice(hostname, typ),
+		bridge: client,
+		dev:    bridges.NewDevice(hostname, typ),
 		ip:     ip,
 	}
 	dev.wg.Add(1)
@@ -241,7 +240,7 @@ func (dev *ShellyComms) connect() (err error) {
 	// Add the device to the client once we've fully connected to it.
 	if !dev.added {
 		dev.added = true
-		dev.client.AddDevice(dev.dev)
+		dev.bridge.AddDevice(dev.dev)
 	}
 
 	if dev.onConnected != nil {

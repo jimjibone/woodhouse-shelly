@@ -1,8 +1,8 @@
 package shelly_v2
 
 import (
-	"github.com/jimjibone/woodhouse-core/wh/v1/devices/attributes"
-	"github.com/jimjibone/woodhouse-core/wh/v1/devices/services"
+	"github.com/jimjibone/wh/v1/bridges/attributes"
+	"github.com/jimjibone/wh/v1/bridges/services"
 )
 
 func initRelay(relay *services.Relay) {

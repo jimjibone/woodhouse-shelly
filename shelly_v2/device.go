@@ -2,7 +2,7 @@ package shelly_v2
 
 import (
 	"github.com/jimjibone/log"
-	"github.com/jimjibone/woodhouse-core/wh/v1"
+	"github.com/jimjibone/wh/v1/bridges"
 )
 
 type Device interface {
@@ -11,7 +11,7 @@ type Device interface {
 	SetNextIP(ip string)
 }
 
-func Generate(app, hostname, ip, name string, client *wh.Client) Device {
+func Generate(app, hostname, ip, name string, client *bridges.Bridge) Device {
 	// switch hostname {
 	// case "ShellyPlusPlugUK-DEADBEEF":
 	// 	return NewShellyPlusPlugUK(hostname, ip, client)
