@@ -1,9 +1,12 @@
 package shelly_v2
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
 	"sync"
 	"time"
@@ -85,6 +88,44 @@ func (dev *ShellyComms) OnResponseFrame(handler func(ResponseFrame)) {
 
 func (dev *ShellyComms) OnNotificationFrame(handler func(NotificationFrame)) {
 	dev.onNotificationFrame = handler
+}
+
+// RequestSetDeviceName renames the device using the Sys.SetConfig RPC method.
+// The request is made over HTTP rather than the websocket so that the response
+// can be awaited and any device-reported error returned to the caller.
+func (dev *ShellyComms) RequestSetDeviceName(name string) error {
+	payload, err := json.Marshal(RequestFrame{
+		ID:     "122",
+		Src:    "woodhouse-4",
+		Method: "Sys.SetConfig",
+		Params: SysSetConfig{Config: SysConfig{Device: SysDeviceConfig{Name: name}}},
+	})
+	if err != nil {
+		return err
+	}
+
+	client := http.Client{Timeout: 10 * time.Second}
+	res, err := client.Post(fmt.Sprintf("http://%s/rpc", dev.ip), "application/json", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+
+	var frame ResponseFrame
+	err = json.Unmarshal(body, &frame)
+	if err != nil {
+		return fmt.Errorf("unmarshal response frame: %w", err)
+	}
+	if frame.Error.Message != "" {
+		return fmt.Errorf("device error %d: %s", frame.Error.Code, frame.Error.Message)
+	}
+
+	return nil
 }
 
 func (dev *ShellyComms) RequestSwitchSet(id string, request SwitchSet) error {

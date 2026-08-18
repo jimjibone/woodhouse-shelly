@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -69,7 +70,7 @@ func NewShellyDimmer2(hostname, ip string, client *bridges.Bridge) *ShellyDimmer
 	}
 	dev.log.Infof("created")
 	dev.dev.AddService(dev.info, dev.online, dev.lightbulb)
-	dev.info.Name.OnAction(dev.handleNameAction)
+	dev.info.EnableRename(dev.handleRename)
 	dev.lightbulb.OnAction(dev.handleLightbulbAction)
 
 	// Get the initial info and state.
@@ -100,8 +101,22 @@ func (dev *ShellyDimmer2) SetNextIP(ip string) {
 	dev.nextIP = ip
 }
 
-func (dev *ShellyDimmer2) handleNameAction(val string) {
-	dev.log.Errorf("not changing name to %s", val)
+// handleRename sets the device name via the settings endpoint, which responds
+// with the updated settings from which the info name attribute is refreshed.
+func (dev *ShellyDimmer2) handleRename(newName string) error {
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
+
+	settings := DeviceSettings{}
+	err := dev.rest.GetJSON("settings?"+url.Values{"name": {newName}}.Encode(), &settings)
+	if err != nil {
+		dev.log.Errorf("failed to rename device: %s", err)
+		return fmt.Errorf("failed to rename device: %w", err)
+	}
+
+	dev.log.Infof("renamed device to %q", settings.Name)
+	dev.info.Name.Set(settings.Name)
+	return nil
 }
 
 func (dev *ShellyDimmer2) handleLightbulbAction(request *clientsapi.ActionRequest, feedback func(*clientsapi.ActionResponse)) error {

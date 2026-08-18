@@ -46,7 +46,7 @@ func NewShellyPlus2PM(hostname, ip string, client *bridges.Bridge) *ShellyPlus2P
 		dev.relay0,
 		dev.relay1,
 	)
-	dev.info.Name.OnAction(dev.handleNameAction)
+	dev.info.EnableRename(dev.handleRename)
 	dev.relay0.OnAction(dev.handleRelay0Action)
 	dev.relay1.OnAction(dev.handleRelay1Action)
 
@@ -152,8 +152,15 @@ func (dev *ShellyPlus2PM) onNotificationFrame(frame NotificationFrame) {
 	}
 }
 
-func (dev *ShellyPlus2PM) handleNameAction(val string) {
-	dev.shelly.log.Errorf("not changing name to %s", val)
+func (dev *ShellyPlus2PM) handleRename(newName string) error {
+	err := dev.shelly.RequestSetDeviceName(newName)
+	if err != nil {
+		dev.shelly.log.Errorf("failed to rename device: %s", err)
+		return fmt.Errorf("failed to rename device: %w", err)
+	}
+	dev.shelly.log.Infof("renamed device to %q", newName)
+	dev.info.Name.Set(newName)
+	return nil
 }
 
 func (dev *ShellyPlus2PM) handleRelay0Action(request *clientsapi.ActionRequest, feedback func(*clientsapi.ActionResponse)) error {
