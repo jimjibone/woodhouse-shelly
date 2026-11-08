@@ -2,6 +2,7 @@ package shelly_v1
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
@@ -10,18 +11,37 @@ import (
 	"time"
 
 	"github.com/jimjibone/log"
-	"github.com/jimjibone/wh/v1/bridges"
-	"github.com/jimjibone/wh/v1/bridges/services"
-	clientsapi "github.com/jimjibone/woodhouse-api/go/v1/clients"
+	"github.com/jimjibone/wh/v2/bridges"
+	"github.com/jimjibone/wh/v2/bridges/services"
+	"github.com/jimjibone/wh/v2/types"
+	clientsapi "github.com/jimjibone/woodhouse-api/go/v2/clients"
 )
 
 func init() {
-	registerDevice("SHDM-2", func(hostname, ip string, client *bridges.Bridge) Device {
-		return NewShellyDimmer2(hostname, ip, client)
+	registerDevice("SHDM-2", func(hostname, mac, ip string, client *bridges.Bridge) Device {
+		dev, err := NewShellyDimmer2(hostname, mac, ip, client)
+		if err != nil {
+			log.Errorf("failed to create %s: %s", hostname, err)
+			return nil
+		}
+		return dev
 	})
 }
 
+// The Dimmer 2 has a single light channel, gen 1 component index 0, which is
+// published as endpoint "1" (endpoint "0" is the root endpoint).
+const (
+	dimmer2LightIndex    = 0
+	dimmer2EndpointID    = "1"
+	dimmer2MaxTransition = 5000 * time.Millisecond
+)
+
 // ShellyDimmer2 - device type: SHDM-2
+//
+// Device shape:
+//
+//	endpoint 0 (root): info, online, update, device_temperature (when reported)
+//	endpoint 1:        light (feature brightness)
 type ShellyDimmer2 struct {
 	log      *log.Context
 	rest     *Rest
@@ -32,10 +52,10 @@ type ShellyDimmer2 struct {
 	bridge *bridges.Bridge
 	added  bool
 
-	dev       *bridges.Device
-	info      *services.Info
-	online    *services.Online
-	lightbulb *services.Lightbulb
+	dev    *bridges.Device
+	update *services.Update
+	temp   *services.DeviceTemperature // nil until the device reports a temperature
+	light  *services.Light
 
 	mu    sync.RWMutex
 	wg    sync.WaitGroup
@@ -54,27 +74,80 @@ type ShellyDimmer2State struct {
 	TransitionMs   int    `json:"transition"`      // One-shot transition, 0..5000 [ms]
 }
 
-func NewShellyDimmer2(hostname, ip string, client *bridges.Bridge) *ShellyDimmer2 {
-	ctx, close := context.WithCancel(context.Background())
-	dev := &ShellyDimmer2{
-		log:       log.NewContext(log.DefaultLogger, hostname, log.DebugLevel),
-		rest:      NewRest(ip),
-		hostname:  hostname,
-		ip:        ip,
-		bridge:    client,
-		dev:       bridges.NewDevice(hostname, clientsapi.Device_DEVICE),
-		info:      services.NewInfo(),
-		online:    services.NewOnline(),
-		lightbulb: services.NewLightbulb("lightbulb"),
-		close:     close,
+// newShellyDimmer2 creates the device and its services without touching the
+// network or starting the run loop.
+func newShellyDimmer2(hostname, mac, ip string, client *bridges.Bridge) (*ShellyDimmer2, error) {
+	id, err := bridges.DeviceID("shelly", mac)
+	if err != nil {
+		return nil, fmt.Errorf("device id from mac %q: %w", mac, err)
 	}
-	dev.log.Infof("created")
-	dev.dev.AddService(dev.info, dev.online, dev.lightbulb)
-	dev.info.EnableRename(dev.handleRename)
-	dev.lightbulb.OnAction(dev.handleLightbulbAction)
+
+	dev := &ShellyDimmer2{
+		log:      log.NewContext(log.DefaultLogger, hostname, log.DebugLevel),
+		rest:     NewRest(ip),
+		hostname: hostname,
+		ip:       ip,
+		bridge:   client,
+		dev:      bridges.NewDevice(id, clientsapi.Device_DEVICE),
+		update:   services.NewUpdate(""),
+		light:    services.NewLight("", services.LightFeatureBrightness),
+		close:    func() {},
+	}
+
+	// Root endpoint: info and online are created with the device.
+	dev.dev.AddService(dev.update)
+	dev.dev.Info.EnableRename(dev.handleRename)
+	dev.update.OnStart(dev.handleUpdateStart)
+
+	// Output endpoint. The label is set once the settings are known.
+	dev.dev.Endpoint(dimmer2EndpointID).SetLabel("Output 1")
+	dev.dev.Endpoint(dimmer2EndpointID).AddService(dev.light)
+	dev.light.On.OnWrite(func(on bool) error {
+		return dev.setLight(&on, nil, nil)
+	})
+	dev.light.Brightness.OnWrite(func(bri int64) error {
+		return dev.setLight(nil, &bri, nil)
+	})
+	dev.light.OnSet(func(p types.LightSetParams) error {
+		return dev.setLight(p.On, p.Brightness, p.Transition)
+	})
+	narrowTransition(dev.light)
+
+	return dev, nil
+}
+
+// narrowTransition limits the transition param of light.set to what the
+// Dimmer 2 supports: 0 to 5000ms.
+func narrowTransition(light *services.Light) {
+	spec := light.CommandSpec("set")
+	if spec == nil {
+		return
+	}
+	for _, param := range spec.GetParams() {
+		if param.GetId() != "transition" {
+			continue
+		}
+		if d := param.GetSpec().GetDuration(); d != nil {
+			max := dimmer2MaxTransition.Milliseconds()
+			step := uint64(1)
+			d.Max = &max
+			d.Step = &step
+		}
+	}
+}
+
+func NewShellyDimmer2(hostname, mac, ip string, client *bridges.Bridge) (*ShellyDimmer2, error) {
+	dev, err := newShellyDimmer2(hostname, mac, ip, client)
+	if err != nil {
+		return nil, err
+	}
+	dev.log.Infof("created %s", dev.dev.ID())
+
+	ctx, close := context.WithCancel(context.Background())
+	dev.close = close
 
 	// Get the initial info and state.
-	err := dev.updateInfo()
+	err = dev.updateInfo()
 	if err != nil {
 		dev.log.Warnf("failed to update info: %s", err)
 	}
@@ -85,19 +158,18 @@ func NewShellyDimmer2(hostname, ip string, client *bridges.Bridge) *ShellyDimmer
 
 	dev.wg.Add(1)
 	go dev.run(ctx)
-	return dev
-}
-
-func (dev *ShellyDimmer2) ID() string {
-	return dev.hostname
+	return dev, nil
 }
 
 func (dev *ShellyDimmer2) Close() {
 	dev.close()
 	dev.wg.Wait()
+	dev.dev.Close()
 }
 
 func (dev *ShellyDimmer2) SetNextIP(ip string) {
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
 	dev.nextIP = ip
 }
 
@@ -115,52 +187,71 @@ func (dev *ShellyDimmer2) handleRename(newName string) error {
 	}
 
 	dev.log.Infof("renamed device to %q", settings.Name)
-	dev.info.Name.Set(settings.Name)
+	dev.dev.Info.Name.Set(settings.Name)
 	return nil
 }
 
-func (dev *ShellyDimmer2) handleLightbulbAction(request *clientsapi.ActionRequest, feedback func(*clientsapi.ActionResponse)) error {
+// handleUpdateStart asks the device to install the available firmware update.
+func (dev *ShellyDimmer2) handleUpdateStart() error {
+	dev.mu.Lock()
+	defer dev.mu.Unlock()
+
+	if !dev.update.Available.Get() {
+		return errors.New("no firmware update available")
+	}
+
+	var res map[string]any
+	err := dev.rest.GetJSON("ota?update=true", &res)
+	if err != nil {
+		dev.log.Errorf("failed to start update: %s", err)
+		return fmt.Errorf("failed to start update: %w", err)
+	}
+
+	dev.log.Infof("started firmware update")
+	dev.update.Updating.Set(true)
+	return nil
+}
+
+// setLight sends the requested changes to the light channel. Any of on,
+// brightness and transition may be nil to leave it unchanged.
+func (dev *ShellyDimmer2) setLight(on *bool, brightness *int64, transition *time.Duration) error {
+	reqparams := lightParams(on, brightness, transition)
+	if reqparams == "" {
+		return nil
+	}
+
+	dev.log.Infof("name: %s, sending request: %s", dev.dev.Info.Name.Get(), reqparams)
+	err := dev.requestAndUpdateState(reqparams)
+	if err != nil {
+		dev.log.Errorf("failed to set state: %s", err)
+		return err
+	}
+	return nil
+}
+
+// lightParams builds the light/0 query string for the requested changes.
+func lightParams(on *bool, brightness *int64, transition *time.Duration) string {
 	var params []string
 
-	for _, req := range request.Values {
-		switch req.Id {
-		case dev.lightbulb.On.ID():
-			if req.GetBool() == nil {
-				return services.ErrIncorrectTypeFor(dev.lightbulb.On)
-			}
-			if req.GetBool().GetValue() {
-				params = append(params, "turn=on")
-			} else {
-				params = append(params, "turn=off")
-			}
-
-		case dev.lightbulb.Brightness.ID():
-			if req.GetInt() == nil {
-				return services.ErrIncorrectTypeFor(dev.lightbulb.Brightness)
-			}
-			bri := math.Max(math.Min(float64(req.GetInt().GetValue()), 100), 0)
-			params = append(params, fmt.Sprintf("brightness=%.0f", bri))
-
-		case dev.lightbulb.Transition.ID():
-			if req.GetDuration() == nil {
-				return services.ErrIncorrectTypeFor(dev.lightbulb.Transition)
-			}
-			trans := math.Max(math.Min(float64(req.GetDuration().GetValue()), 5000), 0)
-			params = append(params, fmt.Sprintf("transition=%.0f", trans))
+	if on != nil {
+		if *on {
+			params = append(params, "turn=on")
+		} else {
+			params = append(params, "turn=off")
 		}
 	}
 
-	if len(params) > 0 {
-		reqparams := strings.Join(params, "&")
-		dev.log.Infof("name: %s, sending request: %s", dev.info.Name.Get(), reqparams)
-		err := dev.requestAndUpdateState(reqparams)
-		if err != nil {
-			dev.log.Errorf("failed to set state: %s", err)
-			return err
-		}
+	if brightness != nil {
+		bri := math.Max(math.Min(float64(*brightness), 100), 0)
+		params = append(params, fmt.Sprintf("brightness=%.0f", bri))
 	}
 
-	return nil
+	if transition != nil {
+		trans := math.Max(math.Min(float64(transition.Milliseconds()), float64(dimmer2MaxTransition.Milliseconds())), 0)
+		params = append(params, fmt.Sprintf("transition=%.0f", trans))
+	}
+
+	return strings.Join(params, "&")
 }
 
 func (dev *ShellyDimmer2) run(ctx context.Context) {
@@ -217,7 +308,19 @@ func (dev *ShellyDimmer2) updateInfo() error {
 		return err
 	}
 
+	// The status carries the firmware update and temperature, which decide
+	// the services of the root endpoint, so it is needed before the device
+	// is added.
+	var status DeviceStatusSummary
+	err = dev.rest.GetJSON("status", &status)
+	if err != nil {
+		return fmt.Errorf("get status: %w", err)
+	}
+
 	dev.log.Debugf("settings: %s", settings.Name)
+
+	dev.applySettings(settings)
+	dev.applyStatus(status)
 
 	// Add the device to the client once we've fully connected to it.
 	if !dev.added {
@@ -225,25 +328,59 @@ func (dev *ShellyDimmer2) updateInfo() error {
 		dev.bridge.AddDevice(dev.dev)
 	}
 
-	if dev.info.Name.Set(settings.Name) {
+	return nil
+}
+
+// applySettings updates the info service and the output label from the
+// device settings.
+func (dev *ShellyDimmer2) applySettings(settings DeviceSettings) {
+	if dev.dev.Info.Name.Set(settings.Name) {
 		dev.log.Infof("name: %s", settings.Name)
 	}
-	dev.info.Model.Set("Shelly Dimmer 2")
-	dev.info.Manufacturer.Set("Shelly")
-	// dev.info.SerialNumber.Set("")
-	// dev.info.FirmwareVersion.Set("")
-	dev.info.WebUrl.Set("http://" + dev.ip)
-	dev.online.Online.Set(true)
-	dev.online.LastSeen.Set(time.Now())
+	dev.dev.Info.Model.Set("Shelly Dimmer 2")
+	dev.dev.Info.Manufacturer.Set("Shelly")
+	dev.dev.Info.SerialNumber.Set(settings.Device.Mac)
+	dev.dev.Info.FirmwareVersion.Set(settings.Fw)
+	dev.dev.Info.WebURL.Set("http://" + dev.ip)
+	dev.dev.Online.Online.Set(true)
+	dev.dev.Online.LastSeen.Set(time.Now())
 
-	return nil
+	label := "Output 1"
+	if dimmer2LightIndex < len(settings.Lights) && settings.Lights[dimmer2LightIndex].Name != "" {
+		label = settings.Lights[dimmer2LightIndex].Name
+	}
+	dev.dev.Endpoint(dimmer2EndpointID).SetLabel(label)
+}
+
+// applyStatus updates the update and device_temperature services from the
+// device status. The temperature service is created on the first status that
+// reports a temperature; that must happen before the device is added.
+func (dev *ShellyDimmer2) applyStatus(status DeviceStatusSummary) {
+	dev.update.Available.Set(status.Update.HasUpdate)
+	if status.Update.OldVersion != "" {
+		dev.update.CurrentVersion.Set(status.Update.OldVersion)
+	}
+	if status.Update.NewVersion != "" {
+		dev.update.UpdateVersion.Set(status.Update.NewVersion)
+	}
+	dev.update.Updating.Set(status.Update.Status == "updating")
+
+	if status.Tmp != nil {
+		if dev.temp == nil {
+			dev.temp = services.NewDeviceTemperature("")
+			dev.dev.AddService(dev.temp)
+		}
+		if status.Tmp.IsValid {
+			dev.temp.Temperature.Set(status.Tmp.TC)
+		}
+	}
 }
 
 func (dev *ShellyDimmer2) requestAndUpdateState(params string) error {
 	dev.mu.Lock()
 	defer dev.mu.Unlock()
 
-	endpoint := "light/0"
+	endpoint := fmt.Sprintf("light/%d", dimmer2LightIndex)
 	if params != "" {
 		endpoint = endpoint + "?" + params
 	}
@@ -252,32 +389,33 @@ func (dev *ShellyDimmer2) requestAndUpdateState(params string) error {
 	next := ShellyDimmer2State{}
 	err := dev.rest.GetJSON(endpoint, &next)
 	if err != nil {
-		if dev.online.Online.Set(false) {
+		if dev.dev.Online.Online.Set(false) {
 			dev.log.Infof("went offline")
 		}
 		return err
 	}
 
-	// transition := time.Duration(next.TransitionMs) * time.Millisecond
-	// dev.log.Debugf("state - on: %t, bri: %d, transition: %s", next.IsOn, next.Brightness, transition)
+	dev.applyState(next)
+	return nil
+}
 
+// applyState updates the online and light services from the light state.
+func (dev *ShellyDimmer2) applyState(next ShellyDimmer2State) {
 	changed := false
-	if dev.online.Online.Set(true) {
+	if dev.dev.Online.Online.Set(true) {
 		dev.log.Infof("came online")
 		changed = true
 	}
-	if dev.lightbulb.On.Set(next.IsOn) {
+	if dev.light.On.Set(next.IsOn) {
 		dev.log.Infof("on: %t", next.IsOn)
 		changed = true
 	}
-	if dev.lightbulb.Brightness.Set(int64(next.Brightness)) {
+	if dev.light.Brightness.Set(int64(next.Brightness)) {
 		dev.log.Infof("brightness: %d%%", next.Brightness)
 		changed = true
 	}
 	if changed {
 		// Prevent unnecessary updates when nothing changed.
-		dev.online.LastSeen.Set(time.Now())
+		dev.dev.Online.LastSeen.Set(time.Now())
 	}
-
-	return nil
 }

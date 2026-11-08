@@ -71,6 +71,23 @@ type DeviceStatus struct {
 	Uptime   int `json:"uptime"`
 }
 
+// DeviceStatusSummary holds the parts of the /status response that the bridge
+// uses. DeviceStatus above is not used for decoding as its field types do not
+// match every device (e.g. loaderror is a number on the Dimmer 2).
+type DeviceStatusSummary struct {
+	Tmp *struct {
+		TC      float64 `json:"tC"`
+		TF      float64 `json:"tF"`
+		IsValid bool    `json:"is_valid"`
+	} `json:"tmp"` // nil when the device does not report a temperature
+	Update struct {
+		Status     string `json:"status"` // idle, pending, updating or unknown
+		HasUpdate  bool   `json:"has_update"`
+		NewVersion string `json:"new_version"`
+		OldVersion string `json:"old_version"`
+	} `json:"update"`
+}
+
 func (d DeviceStatus) String() string {
 	txt, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
@@ -131,6 +148,9 @@ type DeviceSettings struct {
 		Username    string `json:"username"`
 		Password    string `json:"password"`
 	} `json:"login"`
+	Lights []struct {
+		Name string `json:"name"` // Channel name, empty if not configured
+	} `json:"lights"`
 	PinCode            string `json:"pin_code"`
 	CoiotExecuteEnable bool   `json:"coiot_execute_enable"`
 	Name               string `json:"name"`
