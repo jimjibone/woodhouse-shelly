@@ -8,7 +8,7 @@ import (
 
 	"github.com/grandcat/zeroconf"
 	"github.com/jimjibone/log"
-	"github.com/jimjibone/wh/v1/bridges"
+	"github.com/jimjibone/wh/v2/bridges"
 	"github.com/jimjibone/woodhouse-shelly/shelly_v1"
 	"github.com/jimjibone/woodhouse-shelly/shelly_v2"
 )
@@ -83,16 +83,19 @@ func shellyStuff(wg *sync.WaitGroup, ctx context.Context, client *bridges.Bridge
 		}
 
 		if !exists {
-			_, device_v1, device_v2, retry := handleDiscovery(ip, hostname, client)
+			device_v1, device_v2, retry := handleDiscovery(ip, hostname, client)
 			if retry {
 				return true
 			}
 
+			// Devices are tracked by mDNS hostname here, as that is all a
+			// discovery entry carries. The Woodhouse device ID is derived from
+			// the MAC address instead.
 			if device_v1 != nil {
-				devices_v1[device_v1.ID()] = device_v1
+				devices_v1[hostname] = device_v1
 			}
 			if device_v2 != nil {
-				devices_v2[device_v2.ID()] = device_v2
+				devices_v2[hostname] = device_v2
 			}
 		}
 
@@ -132,19 +135,19 @@ func shellyStuff(wg *sync.WaitGroup, ctx context.Context, client *bridges.Bridge
 	}
 }
 
-func handleDiscovery(ip, hostname string, client *bridges.Bridge) (deviceID string, device_v1 shelly_v1.Device, device_v2 shelly_v2.Device, retry bool) {
+func handleDiscovery(ip, hostname string, client *bridges.Bridge) (device_v1 shelly_v1.Device, device_v2 shelly_v2.Device, retry bool) {
 	// Gen 1 Device API - https://shelly-api-docs.shelly.cloud/gen1
 	if strings.Contains(hostname, "shelly") {
 		rest := shelly_v1.NewRest(ip)
 		settings, err := rest.GetSettings()
 		if err != nil {
 			log.Errorf("failed to get settings for %s: %s", ip, err)
-			return "", nil, nil, true
+			return nil, nil, true
 		}
 
 		log.Infof("discovered v1 %s at http://%s (name: %s, type: %s)", hostname, ip, settings.Name, settings.Device.Type)
 
-		return hostname, shelly_v1.Generate(settings.Device.Type, hostname, ip, client), nil, false
+		return shelly_v1.Generate(settings.Device.Type, hostname, settings.Device.Mac, ip, client), nil, false
 	}
 
 	// Gen 2 Device API - https://shelly-api-docs.shelly.cloud/gen2
@@ -153,15 +156,15 @@ func handleDiscovery(ip, hostname string, client *bridges.Bridge) (deviceID stri
 		info, err := rest.GetShelly()
 		if err != nil {
 			log.Errorf("failed to get shelly info for %s: %s", ip, err)
-			return "", nil, nil, true
+			return nil, nil, true
 		}
 
 		log.Infof("discovered v2 %s at http://%s (name: %s, app: %s)", hostname, ip, info.Name, info.App)
 
-		return hostname, nil, shelly_v2.Generate(info.App, hostname, ip, info.Name, client), false
+		return nil, shelly_v2.Generate(info.App, hostname, info.MAC, ip, info.Name, client), false
 	}
 
 	log.Warnf("other thing %s at http://%s", hostname, ip)
 
-	return "", nil, nil, false
+	return nil, nil, false
 }

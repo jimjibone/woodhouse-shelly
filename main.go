@@ -6,9 +6,9 @@ import (
 	"sync"
 
 	"github.com/jimjibone/log"
-	"github.com/jimjibone/wh/v1/bridges"
-	"github.com/jimjibone/wh/v1/clients"
-	"github.com/jimjibone/wh/v1/shared/stores"
+	"github.com/jimjibone/wh/v2/bridges"
+	"github.com/jimjibone/wh/v2/clients"
+	"github.com/jimjibone/wh/v2/shared/stores"
 	"github.com/urfave/cli/v2"
 )
 
