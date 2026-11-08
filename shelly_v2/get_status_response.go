@@ -36,8 +36,10 @@ type GetStatusResponse struct {
 }
 
 type GetStatusResponseInput struct {
-	ID    int  `json:"id"`
-	State bool `json:"state"`
+	ID       int      `json:"id"`
+	State    *bool    `json:"state"`    // switch inputs; null for buttons and when not reported
+	Percent  *float64 `json:"percent"`  // analog inputs
+	XPercent *float64 `json:"xpercent"` // analog inputs with a configured expression
 }
 
 type GetStatusResponseScript struct {
@@ -58,8 +60,8 @@ type GetStatusResponseSwitch struct {
 		MinuteTimestamp int       `json:"minute_ts"`
 	} `json:"aenergy"`
 	Temperature *struct {
-		Centigrade float64 `json:"tC"`
-		Farenheit  float64 `json:"tF"`
+		Centigrade *float64 `json:"tC"` // null when out of the measurement range
+		Farenheit  *float64 `json:"tF"`
 	} `json:"temperature"`
 }
 

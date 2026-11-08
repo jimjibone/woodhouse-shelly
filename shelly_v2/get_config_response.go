@@ -74,10 +74,11 @@ type GetConfigResponse struct {
 }
 
 type GetConfigResponseInput struct {
-	ID     int    `json:"id"`
-	Name   string `json:"name"`
-	Type   string `json:"type"`
-	Invert bool   `json:"invert"`
+	ID       int       `json:"id"`
+	Name     string    `json:"name"`
+	Type     string    `json:"type"` // switch, button, analog or count
+	Invert   bool      `json:"invert"`
+	RangeMap []float64 `json:"range_map"` // analog only: [min, max], null when not set
 }
 
 type GetConfigResponseScript struct {

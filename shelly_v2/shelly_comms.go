@@ -13,8 +13,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jimjibone/log"
-	"github.com/jimjibone/wh/v1/bridges"
-	clientsapi "github.com/jimjibone/woodhouse-api/go/v1/clients"
+	"github.com/jimjibone/wh/v2/bridges"
+	clientsapi "github.com/jimjibone/woodhouse-api/go/v2/clients"
 )
 
 const (
@@ -47,27 +47,34 @@ type ShellyComms struct {
 	onNotificationFrame func(NotificationFrame)
 }
 
-func NewShellyComms(hostname, ip string, typ clientsapi.Device_DeviceType, client *bridges.Bridge) *ShellyComms {
-	ctx, cancel := context.WithCancel(context.Background())
-	dev := &ShellyComms{
-		log:    log.NewContext(log.DefaultLogger, hostname, log.DebugLevel),
-		close:  cancel,
-		bridge: client,
-		dev:    bridges.NewDevice(hostname, typ),
-		ip:     ip,
+// NewShellyComms creates the comms and the Woodhouse device, whose ID is
+// derived from the MAC address. Set the handlers and then call Start.
+func NewShellyComms(hostname, mac, ip string, typ clientsapi.Device_DeviceType, client *bridges.Bridge) (*ShellyComms, error) {
+	id, err := bridges.DeviceID("shelly", mac)
+	if err != nil {
+		return nil, fmt.Errorf("device id from mac %q: %w", mac, err)
 	}
+	return &ShellyComms{
+		log:    log.NewContext(log.DefaultLogger, hostname, log.DebugLevel),
+		close:  func() {},
+		bridge: client,
+		dev:    bridges.NewDevice(id, typ),
+		ip:     ip,
+	}, nil
+}
+
+// Start connects to the device and keeps the connection up until Close.
+func (dev *ShellyComms) Start() {
+	ctx, cancel := context.WithCancel(context.Background())
+	dev.close = cancel
 	dev.wg.Add(1)
 	go dev.run(ctx)
-	return dev
 }
 
 func (dev *ShellyComms) Close() {
 	dev.close()
 	dev.wg.Wait()
-}
-
-func (dev *ShellyComms) ID() string {
-	return dev.dev.ID()
+	dev.dev.Close()
 }
 
 func (dev *ShellyComms) SetNextIP(ip string) {
@@ -90,62 +97,84 @@ func (dev *ShellyComms) OnNotificationFrame(handler func(NotificationFrame)) {
 	dev.onNotificationFrame = handler
 }
 
-// RequestSetDeviceName renames the device using the Sys.SetConfig RPC method.
-// The request is made over HTTP rather than the websocket so that the response
-// can be awaited and any device-reported error returned to the caller.
-func (dev *ShellyComms) RequestSetDeviceName(name string) error {
+// requestRPC calls an RPC method and returns its result. The request is made
+// over HTTP rather than the websocket so that the response can be awaited and
+// any device-reported error returned to the caller.
+func (dev *ShellyComms) requestRPC(method string, params any) (json.RawMessage, error) {
 	payload, err := json.Marshal(RequestFrame{
 		ID:     "122",
 		Src:    "woodhouse-4",
-		Method: "Sys.SetConfig",
-		Params: SysSetConfig{Config: SysConfig{Device: SysDeviceConfig{Name: name}}},
+		Method: method,
+		Params: params,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	client := http.Client{Timeout: 10 * time.Second}
 	res, err := client.Post(fmt.Sprintf("http://%s/rpc", dev.ip), "application/json", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var frame ResponseFrame
 	err = json.Unmarshal(body, &frame)
 	if err != nil {
-		return fmt.Errorf("unmarshal response frame: %w", err)
+		return nil, fmt.Errorf("unmarshal response frame: %w", err)
 	}
 	if frame.Error.Message != "" {
-		return fmt.Errorf("device error %d: %s", frame.Error.Code, frame.Error.Message)
+		return nil, fmt.Errorf("device error %d: %s", frame.Error.Code, frame.Error.Message)
 	}
 
-	return nil
+	return frame.Result, nil
 }
 
-func (dev *ShellyComms) RequestSwitchSet(id string, request SwitchSet) error {
-	dev.connMu.RLock()
-	defer dev.connMu.RUnlock()
-	if dev.conn == nil {
-		return fmt.Errorf("not connected to device")
-	}
+// RequestSetDeviceName renames the device using the Sys.SetConfig RPC method.
+func (dev *ShellyComms) RequestSetDeviceName(name string) error {
+	_, err := dev.requestRPC("Sys.SetConfig", SysSetConfig{Config: SysConfig{Device: SysDeviceConfig{Name: name}}})
+	return err
+}
 
-	err := dev.conn.WriteJSON(RequestFrame{
-		ID:     FrameID(id),
-		Src:    "woodhouse-4",
-		Method: "Switch.Set",
-		Params: request,
-	})
+// RequestSwitchSet turns a switch on or off using the Switch.Set RPC method.
+func (dev *ShellyComms) RequestSwitchSet(request SwitchSet) error {
+	_, err := dev.requestRPC("Switch.Set", request)
+	return err
+}
+
+// RequestSwitchToggle toggles a switch using the Switch.Toggle RPC method and
+// returns whether it was on before.
+func (dev *ShellyComms) RequestSwitchToggle(id int) (wasOn bool, err error) {
+	result, err := dev.requestRPC("Switch.Toggle", SwitchToggle{ID: id})
 	if err != nil {
-		return err
+		return false, err
 	}
+	var res struct {
+		WasOn bool `json:"was_on"`
+	}
+	err = json.Unmarshal(result, &res)
+	if err != nil {
+		return false, fmt.Errorf("unmarshal toggle result: %w", err)
+	}
+	return res.WasOn, nil
+}
 
-	return nil
+// RequestInputSetRangeMap sets the range map of an analog input using the
+// Input.SetConfig RPC method.
+func (dev *ShellyComms) RequestInputSetRangeMap(id int, min, max float64) error {
+	_, err := dev.requestRPC("Input.SetConfig", InputSetConfig{ID: id, Config: InputConfig{RangeMap: []float64{min, max}}})
+	return err
+}
+
+// RequestUpdate starts a firmware update using the Shelly.Update RPC method.
+func (dev *ShellyComms) RequestUpdate(stage string) error {
+	_, err := dev.requestRPC("Shelly.Update", ShellyUpdate{Stage: stage})
+	return err
 }
 
 func (dev *ShellyComms) run(ctx context.Context) {
@@ -278,14 +307,17 @@ func (dev *ShellyComms) connect() (err error) {
 
 	dev.logDeviceInfo(configResponse, statusResponse)
 
+	// Let the device build its endpoints and services from the config and fill
+	// in the state. This must happen before the device is added to the client
+	// so that the full state sent on adding contains everything.
+	if dev.onConnected != nil {
+		dev.onConnected(configResponse, statusResponse)
+	}
+
 	// Add the device to the client once we've fully connected to it.
 	if !dev.added {
 		dev.added = true
 		dev.bridge.AddDevice(dev.dev)
-	}
-
-	if dev.onConnected != nil {
-		dev.onConnected(configResponse, statusResponse)
 	}
 
 	return nil
@@ -345,7 +377,7 @@ func (dev *ShellyComms) recv(ctx context.Context) {
 				dev.log.Warnf("unmarshal: %s, from message: %s", err, message)
 			} else {
 				dev.log.Debugf("--> recv notification frame: %+v", frame)
-				if frame.NotifyStatus != nil {
+				if frame.NotifyStatus != nil || frame.NotifyEvent != nil {
 					if dev.onNotificationFrame != nil {
 						dev.onNotificationFrame(frame)
 					}
@@ -412,7 +444,9 @@ func (dev *ShellyComms) logDeviceInfo(config GetConfigResponse, status GetStatus
 	for _, val := range status.Inputs {
 		if prev, found := inputs[val.ID]; found {
 			prev.Timestamp = time.Now()
-			prev.State = val.State
+			if val.State != nil {
+				prev.State = *val.State
+			}
 		}
 	}
 	for _, val := range status.Scripts {
@@ -441,8 +475,8 @@ func (dev *ShellyComms) logDeviceInfo(config GetConfigResponse, status GetStatus
 				prev.AverageEnergy.ByMinute = val.AverageEnergy.ByMinute
 				prev.AverageEnergy.MinuteTimestamp = val.AverageEnergy.MinuteTimestamp
 			}
-			if val.Temperature != nil {
-				prev.Temperature = val.Temperature.Centigrade
+			if val.Temperature != nil && val.Temperature.Centigrade != nil {
+				prev.Temperature = *val.Temperature.Centigrade
 			}
 		}
 	}
@@ -476,6 +510,6 @@ func (dev *ShellyComms) logDeviceInfo(config GetConfigResponse, status GetStatus
 	sort.Ints(ids)
 	for _, id := range ids {
 		val := switches[id]
-		dev.log.Infof("switch id: %d, name: %q, ts: %s, state: %t, temp: %0.1f °C, voltage: %.1f V, current: %.1f A, avg.power: %.1f W, avg.energy.total: %.3f Wh", id, val.Name, val.Timestamp.Format("2006/01/02 15:04:05"), val.State, val.Temperature, val.Voltage, val.Current, val.AveragePower, val.AverageEnergy.Total)
+		dev.log.Infof("switch id: %d, name: %q, ts: %s, state: %t, temp: %0.1f C, voltage: %.1f V, current: %.1f A, avg.power: %.1f W, avg.energy.total: %.3f Wh", id, val.Name, val.Timestamp.Format("2006/01/02 15:04:05"), val.State, val.Temperature, val.Voltage, val.Current, val.AveragePower, val.AverageEnergy.Total)
 	}
 }

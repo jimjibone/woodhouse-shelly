@@ -14,3 +14,8 @@ type SysConfig struct {
 type SysDeviceConfig struct {
 	Name string `json:"name"`
 }
+
+// ShellyUpdate - request parameters for the Shelly.Update RPC method.
+type ShellyUpdate struct {
+	Stage string `json:"stage"` // stable or beta
+}
