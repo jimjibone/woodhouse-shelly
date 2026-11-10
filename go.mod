@@ -6,7 +6,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/grandcat/zeroconf v1.0.0
 	github.com/jimjibone/log v0.0.0-20260606072821-03b097ef99de
-	github.com/jimjibone/wh v0.0.0-20261109220819-fd43f55834a5
+	github.com/jimjibone/wh v0.0.0-20261110223835-25c51513e6e1
 	github.com/jimjibone/woodhouse-api v0.0.0-20261109215701-b6cc3fafc2bf
 	github.com/urfave/cli/v2 v2.27.7
 )
